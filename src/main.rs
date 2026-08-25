@@ -5,11 +5,12 @@ mod vikunja;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 
@@ -59,7 +60,8 @@ async fn main() {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/calendar/{secret}", get(calendar))
-        .with_state(state);
+        .with_state(state)
+        .layer(middleware::from_fn(access_log));
 
     let addr: SocketAddr = std::env::var("LISTEN_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
@@ -79,12 +81,43 @@ async fn main() {
         .expect("server error");
 }
 
+async fn access_log(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = redact_path(req.uri().path());
+    let user_agent = req
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-")
+        .to_owned();
+
+    let started = Instant::now();
+    let resp = next.run(req).await;
+
+    tracing::info!(
+        "{method} {path} -> {} in {}ms ua={user_agent:?}",
+        resp.status().as_u16(),
+        started.elapsed().as_millis(),
+    );
+    resp
+}
+
+fn redact_path(path: &str) -> String {
+    match path.strip_prefix("/calendar/") {
+        Some(rest) => {
+            let secret = rest.strip_suffix(".ics").unwrap_or(rest);
+            format!("/calendar/{}", config::redact(secret))
+        }
+        None => path.to_owned(),
+    }
+}
+
 async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutting down");
 }
 
-/// `GET /calendar/{secret}.ics` — builds the calendar fresh on every fetch.
+/// `GET /calendar/{secret}.ics`
 async fn calendar(State(state): State<Arc<AppState>>, Path(secret): Path<String>) -> Response {
     let secret = secret.strip_suffix(".ics").unwrap_or(&secret);
 
