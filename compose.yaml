@@ -1,6 +1,6 @@
 services:
   vikunja-ics:
-    image: ghcr.io/iauu/vikunja_ics_conv:latest
+    image: ghcr.io/iauu/vikunja_ics_bridge:latest
     container_name: vikunja-ics
     restart: unless-stopped
     ports:
