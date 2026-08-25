@@ -1,0 +1,15 @@
+{
+  "long_secret_key_for_ics_bridge": {
+    "base": "https://vikunja.example.com",
+    "project_id": 8,
+    "filter": "done = false",
+    "api_key": "tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "name": "Vikunja — Work"
+  },
+  "another_secret_for_a_second_calendar": {
+    "base": "https://vikunja.example.com",
+    "project_id": 8,
+    "filter": "done = false && priority >= 3",
+    "api_key": "tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  }
+}

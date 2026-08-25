@@ -1,0 +1,11 @@
+services:
+  vikunja-ics:
+    image: ghcr.io/iauu/vikunja_ics_conv:latest
+    container_name: vikunja-ics
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./cred.json:/config/cred.json:ro
+    environment:
+      RUST_LOG: info

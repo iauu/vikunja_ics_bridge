@@ -1,0 +1,11 @@
+cred.json
+*.cred.json
+
+target
+.git
+.github
+.gitignore
+Dockerfile
+.dockerignore
+compose.yaml
+README.md
