@@ -39,6 +39,10 @@ pub struct Task {
     pub updated: Option<DateTime<Utc>>,
     #[serde(default)]
     pub labels: Option<Vec<Label>>,
+    #[serde(default)]
+    pub repeat_after: Option<i64>,
+    #[serde(default)]
+    pub repeat_mode: i32,
 }
 
 /// Serialises optional date from Vikunja
