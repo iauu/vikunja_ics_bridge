@@ -27,7 +27,10 @@ pub struct Calendar {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct DescriptionDirectives {
-    #[serde(rename = "end", deserialize_with = "deserialize_optional_end_of_day_utc")]
+    #[serde(
+        rename = "end",
+        deserialize_with = "deserialize_optional_end_of_day_utc"
+    )]
     recurrence_until: Option<DateTime<Utc>>,
 }
 
