@@ -196,22 +196,18 @@ fn parse_description_with_mode(raw_html: &str, strip_directive_lines: bool) -> P
         };
     }
 
-    let mut raw_fields = std::collections::BTreeMap::new();
+    let mut directives = DescriptionDirectives::default();
     let mut kept_lines = Vec::new();
     for line in notes.lines() {
-        let mut is_directive_line = false;
-        if let Some((key, value)) = parse_directive_line(line) {
-            if is_recognized_directive_key(&key) {
-                raw_fields.insert(key, value);
-                is_directive_line = true;
-            }
+        let mut parsed_as_directive = false;
+        if let Some(line_directives) = parse_directives_from_toml_line(line) {
+            directives.merge(line_directives);
+            parsed_as_directive = true;
         }
-        if !strip_directive_lines || !is_directive_line {
+        if !strip_directive_lines || !parsed_as_directive {
             kept_lines.push(line);
         }
     }
-
-    let directives = parse_description_directives(&raw_fields);
 
     ParsedDescription {
         text: kept_lines.join("\n").trim().to_string(),
@@ -219,45 +215,16 @@ fn parse_description_with_mode(raw_html: &str, strip_directive_lines: bool) -> P
     }
 }
 
-fn parse_description_directives(
-    raw_fields: &std::collections::BTreeMap<String, String>,
-) -> DescriptionDirectives {
-    let mut table = toml::map::Map::new();
-    for (key, value) in raw_fields {
-        table.insert(key.clone(), toml::Value::String(value.clone()));
-    }
-    toml::Value::Table(table).try_into().unwrap_or_default()
-}
-
-fn is_recognized_directive_key(key: &str) -> bool {
-    key.eq_ignore_ascii_case("end")
-}
-
-fn parse_directive_line(line: &str) -> Option<(String, String)> {
+fn parse_directives_from_toml_line(line: &str) -> Option<DescriptionDirectives> {
     let line = line.trim();
-    let (key, value) = line.split_once(':')?;
-    let key = key.trim().to_ascii_lowercase();
-    if key.is_empty() {
+    if line.is_empty() {
         return None;
     }
-
-    let value = strip_optional_comment_suffix(value.trim());
-    if value.is_empty() {
-        return None;
-    }
-    Some((key, value.to_string()))
-}
-
-fn strip_optional_comment_suffix(value: &str) -> &str {
-    let value = value.trim_end();
-    let Some(start) = value.rfind("(#") else {
-        return value;
-    };
-    let suffix = value[start..].trim();
-    if suffix.starts_with("(#") && suffix.ends_with(')') {
-        value[..start].trim_end()
+    let directives: DescriptionDirectives = toml::from_str(line).ok()?;
+    if directives.recurrence_until.is_some() {
+        Some(directives)
     } else {
-        value
+        None
     }
 }
 
@@ -265,6 +232,14 @@ fn normalize_smart_quotes(input: &str) -> String {
     input
         .replace(['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'], "'")
         .replace(['\u{201C}', '\u{201D}', '\u{201E}', '\u{201F}'], "\"")
+}
+
+impl DescriptionDirectives {
+    fn merge(&mut self, other: DescriptionDirectives) {
+        if other.recurrence_until.is_some() {
+            self.recurrence_until = other.recurrence_until;
+        }
+    }
 }
 
 fn deserialize_optional_end_of_day_utc<'de, D>(
@@ -354,7 +329,7 @@ mod tests {
     #[test]
     fn strips_directive_line_and_parses_until() {
         let parsed = parse_description_and_strip_directives(
-            "<p>end: 31/12/2026 (# optional note)</p><p>Details</p>",
+            "<p>end = \"31/12/2026\" # optional note</p><p>Details</p>",
         );
         assert_eq!(parsed.text, "Details");
         assert_eq!(
@@ -371,16 +346,16 @@ mod tests {
     #[test]
     fn keep_mode_keeps_directive_line() {
         let parsed = parse_description_and_keep_directives(
-            "<p>end: 31/12/2026 (# optional note)</p><p>Details</p>",
+            "<p>end = \"31/12/2026\" # optional note</p><p>Details</p>",
         );
-        assert!(parsed.text.contains("end: 31/12/2026"));
+        assert!(parsed.text.contains("end = \"31/12/2026\" # optional note"));
         assert!(parsed.text.contains("Details"));
     }
 
     #[test]
     fn creates_weekly_rrule_with_until() {
         let task = task_with_repeat(Some(2 * SECONDS_PER_WEEK));
-        let parsed = parse_description_and_strip_directives("<p>end: 31/12/2026</p>");
+        let parsed = parse_description_and_strip_directives("<p>end = \"31/12/2026\"</p>");
         let rrule = recurrence_rrule(&task, &parsed.directives).expect("must build rule");
         assert_eq!(rrule, "FREQ=WEEKLY;INTERVAL=2;UNTIL=20261231T235959Z");
     }
