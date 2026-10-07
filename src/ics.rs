@@ -18,6 +18,10 @@ const DESCRIPTION_WIDTH: usize = 10_000;
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 const SECONDS_PER_WEEK: i64 = 7 * SECONDS_PER_DAY;
 
+const REPEAT_MODE_DEFAULT: i32 = 0;
+const REPEAT_MODE_MONTHLY: i32 = 1;
+const REPEAT_MODE_FROM_COMPLETION: i32 = 2;
+
 pub struct Calendar {
     pub body: String,
     pub event_count: usize,
@@ -243,53 +247,84 @@ fn deserialize_optional_end_of_day_utc<'de, D>(
 where
     D: Deserializer<'de>,
 {
-    let raw = Option::<String>::deserialize(deserializer)?;
-    let Some(raw) = raw else {
+    let raw = Option::<toml::Value>::deserialize(deserializer)?;
+    let Some(val) = raw else {
         return Ok(None);
     };
-    let raw = raw.trim();
+    Ok(parse_end_of_day_utc(&val))
+}
 
-    let mut parts = raw.split('/');
-    let day: u32 = match parts.next().and_then(|v| v.trim().parse().ok()) {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-    let month: u32 = match parts.next().and_then(|v| v.trim().parse().ok()) {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-    let year: i32 = match parts.next().and_then(|v| v.trim().parse().ok()) {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-    if parts.next().is_some() {
-        return Ok(None);
+fn parse_end_of_day_utc(val: &toml::Value) -> Option<DateTime<Utc>> {
+    match val {
+        toml::Value::Datetime(dt) => {
+            if let Some(date) = dt.date {
+                let naive_date =
+                    NaiveDate::from_ymd_opt(date.year as i32, date.month as u32, date.day as u32)?;
+                naive_date.and_hms_opt(23, 59, 59).map(|d| d.and_utc())
+            } else {
+                None
+            }
+        }
+        toml::Value::String(s) => parse_date_str_end_of_day_utc(s),
+        _ => None,
+    }
+}
+
+fn parse_date_str_end_of_day_utc(s: &str) -> Option<DateTime<Utc>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
     }
 
-    let Some(date) = NaiveDate::from_ymd_opt(year, month, day) else {
-        return Ok(None);
-    };
-    Ok(date.and_hms_opt(23, 59, 59).map(|dt| dt.and_utc()))
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&Utc));
+    }
+
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%d/%m/%Y") {
+        return date.and_hms_opt(23, 59, 59).map(|d| d.and_utc());
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%d-%m-%Y") {
+        return date.and_hms_opt(23, 59, 59).map(|d| d.and_utc());
+    }
+
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return date.and_hms_opt(23, 59, 59).map(|d| d.and_utc());
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y/%m/%d") {
+        return date.and_hms_opt(23, 59, 59).map(|d| d.and_utc());
+    }
+
+    None
 }
 
 fn recurrence_rrule(task: &Task, directives: &DescriptionDirectives) -> Option<String> {
-    let repeat_after = task.repeat_after?;
-    if repeat_after <= 0 {
-        return None;
-    }
+    let mut rule = match task.repeat_mode {
+        REPEAT_MODE_DEFAULT => {
+            let repeat_after = task.repeat_after?;
+            if repeat_after <= 0 {
+                return None;
+            }
 
-    let (freq, interval) = if repeat_after % SECONDS_PER_WEEK == 0 {
-        ("WEEKLY", repeat_after / SECONDS_PER_WEEK)
-    } else if repeat_after % SECONDS_PER_DAY == 0 {
-        ("DAILY", repeat_after / SECONDS_PER_DAY)
-    } else {
-        return None;
+            let (freq, interval) = if repeat_after % SECONDS_PER_WEEK == 0 {
+                ("WEEKLY", repeat_after / SECONDS_PER_WEEK)
+            } else if repeat_after % SECONDS_PER_DAY == 0 {
+                ("DAILY", repeat_after / SECONDS_PER_DAY)
+            } else {
+                return None;
+            };
+            if interval <= 0 {
+                return None;
+            }
+            format!("FREQ={freq};INTERVAL={interval}")
+        }
+        REPEAT_MODE_MONTHLY => "FREQ=MONTHLY;INTERVAL=1".to_string(),
+        REPEAT_MODE_FROM_COMPLETION => {
+            // Recurrence from completion day is non-deterministic on a fixed calendar schedule
+            return None;
+        }
+        _ => return None,
     };
-    if interval <= 0 {
-        return None;
-    }
 
-    let mut rule = format!("FREQ={freq};INTERVAL={interval}");
     if let Some(until) = directives.recurrence_until.as_ref() {
         rule.push_str(";UNTIL=");
         rule.push_str(&stamp(until));
