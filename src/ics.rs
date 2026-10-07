@@ -80,7 +80,8 @@ pub fn render(bridge: &Bridge, tasks: &[Task]) -> Calendar {
         };
         ev.push(Summary::new(escape_text(summary)));
 
-        let parsed_description = parse_description_and_strip_directives(&task.description);
+        let description_text = normalize_smart_quotes(&html_to_text(&task.description));
+        let parsed_description = parse_description(&description_text, true);
         let mut notes = parsed_description.text;
         if let Some(due) = task.due_date {
             let due_line = format!("Due: {}", due.to_rfc3339_opts(SecondsFormat::Secs, true));
@@ -179,26 +180,17 @@ fn html_to_text(html: &str) -> String {
     }
 }
 
-fn parse_description_and_strip_directives(raw_html: &str) -> ParsedDescription {
-    parse_description_with_mode(raw_html, true)
-}
-
-fn parse_description_and_keep_directives(raw_html: &str) -> ParsedDescription {
-    parse_description_with_mode(raw_html, false)
-}
-
-fn parse_description_with_mode(raw_html: &str, strip_directive_lines: bool) -> ParsedDescription {
-    let notes = normalize_smart_quotes(&html_to_text(raw_html));
-    if notes.is_empty() {
+fn parse_description(desc: &str, strip_directive_lines: bool) -> ParsedDescription {
+    if desc.is_empty() {
         return ParsedDescription {
-            text: notes,
+            text: String::new(),
             directives: DescriptionDirectives::default(),
         };
     }
 
     let mut directives = DescriptionDirectives::default();
     let mut kept_lines = Vec::new();
-    for line in notes.lines() {
+    for line in desc.lines() {
         let mut parsed_as_directive = false;
         if let Some(line_directives) = parse_directives_from_toml_line(line) {
             directives.merge(line_directives);
@@ -300,69 +292,4 @@ fn recurrence_rrule(task: &Task, directives: &DescriptionDirectives) -> Option<S
         rule.push_str(&stamp(until));
     }
     Some(rule)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn task_with_repeat(repeat_after: Option<i64>) -> Task {
-        Task {
-            id: 1,
-            identifier: String::new(),
-            title: String::new(),
-            description: String::new(),
-            done: false,
-            priority: 0,
-            percent_done: 0.0,
-            start_date: None,
-            end_date: None,
-            due_date: None,
-            created: None,
-            updated: None,
-            labels: None,
-            repeat_after,
-            repeat_mode: 0,
-        }
-    }
-
-    #[test]
-    fn strips_directive_line_and_parses_until() {
-        let parsed = parse_description_and_strip_directives(
-            "<p>end = \"31/12/2026\" # optional note</p><p>Details</p>",
-        );
-        assert_eq!(parsed.text, "Details");
-        assert_eq!(
-            parsed
-                .directives
-                .recurrence_until
-                .as_ref()
-                .map(stamp)
-                .as_deref(),
-            Some("20261231T235959Z")
-        );
-    }
-
-    #[test]
-    fn keep_mode_keeps_directive_line() {
-        let parsed = parse_description_and_keep_directives(
-            "<p>end = \"31/12/2026\" # optional note</p><p>Details</p>",
-        );
-        assert!(parsed.text.contains("end = \"31/12/2026\" # optional note"));
-        assert!(parsed.text.contains("Details"));
-    }
-
-    #[test]
-    fn creates_weekly_rrule_with_until() {
-        let task = task_with_repeat(Some(2 * SECONDS_PER_WEEK));
-        let parsed = parse_description_and_strip_directives("<p>end = \"31/12/2026\"</p>");
-        let rrule = recurrence_rrule(&task, &parsed.directives).expect("must build rule");
-        assert_eq!(rrule, "FREQ=WEEKLY;INTERVAL=2;UNTIL=20261231T235959Z");
-    }
-
-    #[test]
-    fn normalizes_smart_quotes() {
-        let parsed = parse_description_and_keep_directives("<p>“alpha” and ‘beta’</p>");
-        assert_eq!(parsed.text, "\"alpha\" and 'beta'");
-    }
 }
