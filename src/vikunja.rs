@@ -13,6 +13,7 @@ pub struct Label {
 }
 
 #[derive(Debug, Deserialize)]
+#[expect(dead_code)]
 pub struct Task {
     pub id: i64,
     #[serde(default)]
