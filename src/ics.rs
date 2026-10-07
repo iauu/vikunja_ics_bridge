@@ -188,7 +188,7 @@ fn parse_description_and_keep_directives(raw_html: &str) -> ParsedDescription {
 }
 
 fn parse_description_with_mode(raw_html: &str, strip_directive_lines: bool) -> ParsedDescription {
-    let notes = html_to_text(raw_html);
+    let notes = normalize_smart_quotes(&html_to_text(raw_html));
     if notes.is_empty() {
         return ParsedDescription {
             text: notes,
@@ -259,6 +259,12 @@ fn strip_optional_comment_suffix(value: &str) -> &str {
     } else {
         value
     }
+}
+
+fn normalize_smart_quotes(input: &str) -> String {
+    input
+        .replace(['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'], "'")
+        .replace(['\u{201C}', '\u{201D}', '\u{201E}', '\u{201F}'], "\"")
 }
 
 fn deserialize_optional_end_of_day_utc<'de, D>(
@@ -377,5 +383,11 @@ mod tests {
         let parsed = parse_description_and_strip_directives("<p>end: 31/12/2026</p>");
         let rrule = recurrence_rrule(&task, &parsed.directives).expect("must build rule");
         assert_eq!(rrule, "FREQ=WEEKLY;INTERVAL=2;UNTIL=20261231T235959Z");
+    }
+
+    #[test]
+    fn normalizes_smart_quotes() {
+        let parsed = parse_description_and_keep_directives("<p>“alpha” and ‘beta’</p>");
+        assert_eq!(parsed.text, "\"alpha\" and 'beta'");
     }
 }
