@@ -5,6 +5,7 @@ use ics::properties::{
     Summary, Transp, URL,
 };
 use ics::{Event, ICalendar, escape_text};
+use serde::{Deserialize, Deserializer};
 
 use html2text::config;
 
@@ -23,21 +24,10 @@ pub struct Calendar {
     pub skipped: usize,
 }
 
-#[derive(Clone, Copy)]
-struct RenderOptions {
-    keep_directive_lines: bool,
-}
-
-impl Default for RenderOptions {
-    fn default() -> Self {
-        Self {
-            keep_directive_lines: true,
-        }
-    }
-}
-
-#[derive(Default)]
+#[derive(Default, Deserialize)]
+#[serde(default)]
 struct DescriptionDirectives {
+    #[serde(rename = "end", deserialize_with = "deserialize_optional_end_of_day_utc")]
     recurrence_until: Option<DateTime<Utc>>,
 }
 
@@ -48,10 +38,6 @@ struct ParsedDescription {
 
 /// Render tasks that have both a start and an end date as VEVENTs.
 pub fn render(bridge: &Bridge, tasks: &[Task]) -> Calendar {
-    render_with_options(bridge, tasks, RenderOptions::default())
-}
-
-fn render_with_options(bridge: &Bridge, tasks: &[Task], options: RenderOptions) -> Calendar {
     let now = stamp(&Utc::now());
     let domain = bridge.uid_domain();
     let task_base = bridge.base.trim().trim_end_matches('/');
@@ -94,7 +80,7 @@ fn render_with_options(bridge: &Bridge, tasks: &[Task], options: RenderOptions) 
         };
         ev.push(Summary::new(escape_text(summary)));
 
-        let parsed_description = parse_description(&task.description, options);
+        let parsed_description = parse_description_and_strip_directives(&task.description);
         let mut notes = parsed_description.text;
         if let Some(due) = task.due_date {
             let due_line = format!("Due: {}", due.to_rfc3339_opts(SecondsFormat::Secs, true));
@@ -193,7 +179,15 @@ fn html_to_text(html: &str) -> String {
     }
 }
 
-fn parse_description(raw_html: &str, options: RenderOptions) -> ParsedDescription {
+fn parse_description_and_strip_directives(raw_html: &str) -> ParsedDescription {
+    parse_description_with_mode(raw_html, true)
+}
+
+fn parse_description_and_keep_directives(raw_html: &str) -> ParsedDescription {
+    parse_description_with_mode(raw_html, false)
+}
+
+fn parse_description_with_mode(raw_html: &str, strip_directive_lines: bool) -> ParsedDescription {
     let notes = html_to_text(raw_html);
     if notes.is_empty() {
         return ParsedDescription {
@@ -202,18 +196,22 @@ fn parse_description(raw_html: &str, options: RenderOptions) -> ParsedDescriptio
         };
     }
 
-    let mut directives = DescriptionDirectives::default();
+    let mut raw_fields = std::collections::BTreeMap::new();
     let mut kept_lines = Vec::new();
     for line in notes.lines() {
-        let mut keep_line = true;
-        if let Some(until) = parse_recurrence_end_directive(line) {
-            directives.recurrence_until = Some(until);
-            keep_line = options.keep_directive_lines;
+        let mut is_directive_line = false;
+        if let Some((key, value)) = parse_directive_line(line) {
+            if is_recognized_directive_key(&key) {
+                raw_fields.insert(key, value);
+                is_directive_line = true;
+            }
         }
-        if keep_line {
+        if !strip_directive_lines || !is_directive_line {
             kept_lines.push(line);
         }
     }
+
+    let directives = parse_description_directives(&raw_fields);
 
     ParsedDescription {
         text: kept_lines.join("\n").trim().to_string(),
@@ -221,30 +219,81 @@ fn parse_description(raw_html: &str, options: RenderOptions) -> ParsedDescriptio
     }
 }
 
-fn parse_recurrence_end_directive(line: &str) -> Option<DateTime<Utc>> {
+fn parse_description_directives(
+    raw_fields: &std::collections::BTreeMap<String, String>,
+) -> DescriptionDirectives {
+    let mut table = toml::map::Map::new();
+    for (key, value) in raw_fields {
+        table.insert(key.clone(), toml::Value::String(value.clone()));
+    }
+    toml::Value::Table(table).try_into().unwrap_or_default()
+}
+
+fn is_recognized_directive_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("end")
+}
+
+fn parse_directive_line(line: &str) -> Option<(String, String)> {
     let line = line.trim();
     let (key, value) = line.split_once(':')?;
-    if !key.trim().eq_ignore_ascii_case("end") {
+    let key = key.trim().to_ascii_lowercase();
+    if key.is_empty() {
         return None;
     }
 
-    let value = value.trim();
-    let date_token = value
-        .split_once('(')
-        .map_or(value, |(before, _)| before)
-        .trim();
+    let value = strip_optional_comment_suffix(value.trim());
+    if value.is_empty() {
+        return None;
+    }
+    Some((key, value.to_string()))
+}
 
-    let mut parts = date_token.split('/');
-    let day: u32 = parts.next()?.trim().parse().ok()?;
-    let month: u32 = parts.next()?.trim().parse().ok()?;
-    let year: i32 = parts.next()?.trim().parse().ok()?;
+fn strip_optional_comment_suffix(value: &str) -> &str {
+    let value = value.trim_end();
+    let Some(start) = value.rfind("(#") else {
+        return value;
+    };
+    let suffix = value[start..].trim();
+    if suffix.starts_with("(#") && suffix.ends_with(')') {
+        value[..start].trim_end()
+    } else {
+        value
+    }
+}
+
+fn deserialize_optional_end_of_day_utc<'de, D>(
+    deserializer: D,
+) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let raw = raw.trim();
+
+    let mut parts = raw.split('/');
+    let day: u32 = match parts.next().and_then(|v| v.trim().parse().ok()) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let month: u32 = match parts.next().and_then(|v| v.trim().parse().ok()) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let year: i32 = match parts.next().and_then(|v| v.trim().parse().ok()) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
     if parts.next().is_some() {
-        return None;
+        return Ok(None);
     }
 
-    let date = NaiveDate::from_ymd_opt(year, month, day)?;
-    let dt = date.and_hms_opt(23, 59, 59)?.and_utc();
-    Some(dt)
+    let Some(date) = NaiveDate::from_ymd_opt(year, month, day) else {
+        return Ok(None);
+    };
+    Ok(date.and_hms_opt(23, 59, 59).map(|dt| dt.and_utc()))
 }
 
 fn recurrence_rrule(task: &Task, directives: &DescriptionDirectives) -> Option<String> {
@@ -275,7 +324,6 @@ fn recurrence_rrule(task: &Task, directives: &DescriptionDirectives) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     fn task_with_repeat(repeat_after: Option<i64>) -> Task {
         Task {
@@ -298,30 +346,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_end_directive_with_comment() {
-        let until = parse_recurrence_end_directive("end: 31/12/2026 (# optional note)")
-            .expect("must parse end directive");
-        assert_eq!(stamp(&until), "20261231T235959Z");
-    }
-
-    #[test]
-    fn creates_weekly_rrule_with_until() {
-        let task = task_with_repeat(Some(2 * SECONDS_PER_WEEK));
-        let directives = DescriptionDirectives {
-            recurrence_until: Some(Utc.with_ymd_and_hms(2026, 12, 31, 23, 59, 59).unwrap()),
-        };
-        let rrule = recurrence_rrule(&task, &directives).expect("must build rule");
-        assert_eq!(rrule, "FREQ=WEEKLY;INTERVAL=2;UNTIL=20261231T235959Z");
-    }
-
-    #[test]
-    fn keeps_directive_lines_by_default() {
-        let parsed = parse_description(
-            "<p>end: 31/12/2026</p><p>Details</p>",
-            RenderOptions::default(),
+    fn strips_directive_line_and_parses_until() {
+        let parsed = parse_description_and_strip_directives(
+            "<p>end: 31/12/2026 (# optional note)</p><p>Details</p>",
         );
-        assert!(parsed.text.contains("end: 31/12/2026"));
-        assert!(parsed.text.contains("Details"));
+        assert_eq!(parsed.text, "Details");
         assert_eq!(
             parsed
                 .directives
@@ -331,5 +360,22 @@ mod tests {
                 .as_deref(),
             Some("20261231T235959Z")
         );
+    }
+
+    #[test]
+    fn keep_mode_keeps_directive_line() {
+        let parsed = parse_description_and_keep_directives(
+            "<p>end: 31/12/2026 (# optional note)</p><p>Details</p>",
+        );
+        assert!(parsed.text.contains("end: 31/12/2026"));
+        assert!(parsed.text.contains("Details"));
+    }
+
+    #[test]
+    fn creates_weekly_rrule_with_until() {
+        let task = task_with_repeat(Some(2 * SECONDS_PER_WEEK));
+        let parsed = parse_description_and_strip_directives("<p>end: 31/12/2026</p>");
+        let rrule = recurrence_rrule(&task, &parsed.directives).expect("must build rule");
+        assert_eq!(rrule, "FREQ=WEEKLY;INTERVAL=2;UNTIL=20261231T235959Z");
     }
 }
