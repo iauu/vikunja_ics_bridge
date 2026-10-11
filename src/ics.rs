@@ -1,5 +1,7 @@
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
+use chrono_tz::Tz;
 use ics::components::Property;
+use ics::parameters::TzIDParam;
 use ics::properties::{
     Categories, Created, Description, DtEnd, DtStart, LastModified, Priority, RRule, Status,
     Summary, Transp, URL,
@@ -36,6 +38,7 @@ struct DescriptionDirectives {
         deserialize_with = "deserialize_optional_end_of_day_utc"
     )]
     recurrence_until: Option<DateTime<Utc>>,
+    tz: Option<String>,
 }
 
 struct ParsedDescription {
@@ -43,7 +46,100 @@ struct ParsedDescription {
     directives: DescriptionDirectives,
 }
 
-/// Render tasks that have both a start and an end date as VEVENTs.
+#[derive(Debug, PartialEq, Eq)]
+struct TzDirective {
+    reference_date: NaiveDate,
+    tz: Tz,
+}
+
+fn map_abbrev_to_iana(abbrev: &str) -> Option<&'static str> {
+    match abbrev.trim().to_ascii_uppercase().as_str() {
+        "BST" | "GMT" | "WET" => Some("Europe/London"),
+        "CET" | "CEST" => Some("Europe/Berlin"),
+        "EET" | "EEST" => Some("Europe/Athens"),
+        "EST" | "EDT" => Some("America/New_York"),
+        "CST" | "CDT" => Some("America/Chicago"),
+        "MST" | "MDT" => Some("America/Denver"),
+        "PST" | "PDT" => Some("America/Los_Angeles"),
+        "AKST" | "AKDT" => Some("America/Anchorage"),
+        "HST" => Some("Pacific/Honolulu"),
+        "AEST" | "AEDT" => Some("Australia/Sydney"),
+        "ACST" | "ACDT" => Some("Australia/Adelaide"),
+        "AWST" => Some("Australia/Perth"),
+        "NZST" | "NZDT" => Some("Pacific/Auckland"),
+        "JST" => Some("Asia/Tokyo"),
+        "KST" => Some("Asia/Seoul"),
+        "IST" => Some("Asia/Kolkata"),
+        "UTC" => Some("UTC"),
+        _ => None,
+    }
+}
+
+fn parse_naive_date(s: &str) -> Option<NaiveDate> {
+    let s = s.trim();
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%d/%m/%Y") {
+        return Some(d);
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%d-%m-%Y") {
+        return Some(d);
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Some(d);
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y/%m/%d") {
+        return Some(d);
+    }
+    None
+}
+
+fn parse_tz_name(s: &str) -> Option<Tz> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(tz) = map_abbrev_to_iana(s).and_then(|iana| iana.parse::<Tz>().ok()) {
+        return Some(tz);
+    }
+    s.parse::<Tz>().ok()
+}
+
+fn parse_tz_directive(tz_str: Option<&str>) -> Option<TzDirective> {
+    let s = tz_str?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (date_part, tz_part) = s.split_once(';')?;
+    let reference_date = parse_naive_date(date_part.trim())?;
+    let tz = parse_tz_name(tz_part.trim())?;
+    Some(TzDirective { reference_date, tz })
+}
+
+fn compute_event_times(
+    start: &DateTime<Utc>,
+    end: &DateTime<Utc>,
+    tz_dir: Option<&TzDirective>,
+) -> (String, String, Option<&'static str>) {
+    let Some(dir) = tz_dir else {
+        return (stamp(start), stamp(end), None);
+    };
+
+    let duration = *end - *start;
+
+    let start_time_utc = start.time();
+    let ref_dt_utc = dir.reference_date.and_time(start_time_utc).and_utc();
+    let ref_dt_local = ref_dt_utc.with_timezone(&dir.tz);
+    let intended_local_time = ref_dt_local.time();
+
+    let current_start_local_date = start.with_timezone(&dir.tz).date_naive();
+    let event_start_local = current_start_local_date.and_time(intended_local_time);
+    let event_end_local = event_start_local + duration;
+
+    let start_str = event_start_local.format("%Y%m%dT%H%M%S").to_string();
+    let end_str = event_end_local.format("%Y%m%dT%H%M%S").to_string();
+
+    (start_str, end_str, Some(dir.tz.name()))
+}
+
 pub fn render(bridge: &Bridge, tasks: &[Task]) -> Calendar {
     let now = stamp(&Utc::now());
     let domain = bridge.uid_domain();
@@ -77,8 +173,24 @@ pub fn render(bridge: &Bridge, tasks: &[Task]) -> Calendar {
             format!("vikunja-{}-{}@{}", bridge.project_id, task.id, domain),
             now.clone(),
         );
-        ev.push(DtStart::new(stamp(&start)));
-        ev.push(DtEnd::new(stamp(&end)));
+
+        let description_text = normalize_smart_quotes(&html_to_text(&task.description));
+        let parsed_description = parse_description(&description_text, true);
+
+        let tz_dir = parse_tz_directive(parsed_description.directives.tz.as_deref());
+        let (start_str, end_str, tz_name) = compute_event_times(&start, &end, tz_dir.as_ref());
+
+        let mut dtstart = DtStart::new(start_str);
+        if let Some(tz_val) = tz_name {
+            dtstart.add(TzIDParam::new(tz_val));
+        }
+        ev.push(dtstart);
+
+        let mut dtend = DtEnd::new(end_str);
+        if let Some(tz_val) = tz_name {
+            dtend.add(TzIDParam::new(tz_val));
+        }
+        ev.push(dtend);
 
         let summary = if task.title.trim().is_empty() {
             format!("Task #{}", task.id)
@@ -87,8 +199,6 @@ pub fn render(bridge: &Bridge, tasks: &[Task]) -> Calendar {
         };
         ev.push(Summary::new(escape_text(summary)));
 
-        let description_text = normalize_smart_quotes(&html_to_text(&task.description));
-        let parsed_description = parse_description(&description_text, true);
         let mut notes = parsed_description.text;
         if let Some(due) = task.due_date {
             let due_line = format!("Due: {}", due.to_rfc3339_opts(SecondsFormat::Secs, true));
@@ -220,7 +330,7 @@ fn parse_directives_from_toml_line(line: &str) -> Option<DescriptionDirectives> 
         return None;
     }
     let directives: DescriptionDirectives = toml::from_str(line).ok()?;
-    if directives.recurrence_until.is_some() {
+    if directives.recurrence_until.is_some() || directives.tz.is_some() {
         Some(directives)
     } else {
         None
@@ -237,6 +347,9 @@ impl DescriptionDirectives {
     fn merge(&mut self, other: DescriptionDirectives) {
         if other.recurrence_until.is_some() {
             self.recurrence_until = other.recurrence_until;
+        }
+        if other.tz.is_some() {
+            self.tz = other.tz;
         }
     }
 }
@@ -319,7 +432,6 @@ fn recurrence_rrule(task: &Task, directives: &DescriptionDirectives) -> Option<S
         }
         REPEAT_MODE_MONTHLY => "FREQ=MONTHLY;INTERVAL=1".to_string(),
         REPEAT_MODE_FROM_COMPLETION => {
-            // Recurrence from completion day is non-deterministic on a fixed calendar schedule
             return None;
         }
         _ => return None,
