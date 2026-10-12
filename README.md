@@ -36,16 +36,3 @@ cargo run --release
 | `GET /calendar/<secret>.ics` | The calendar. The `.ics` suffix is optional. |
 | `GET /healthz` | Liveness probe, returns `ok`. |
 
-### Recurrence exclusions
-
-For a recurring task, put this TOML line in its description to omit individual
-occurrences from the generated calendar:
-
-```toml
-skip = "2026-12-25;2027-01-01;2027-04-02"
-```
-
-Dates may be written as `YYYY-MM-DD`, `DD-MM-YYYY`, `DD/MM/YYYY`, or
-`YYYY/MM/DD`. The bridge emits them as `EXDATE` values at the event's start
-time. Combine this with the existing `tz` directive when the recurrence uses a
-local timezone.

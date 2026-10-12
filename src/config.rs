@@ -39,10 +39,24 @@ impl Bridge {
 pub type Bridges = HashMap<String, Bridge>;
 
 pub fn load(path: &Path) -> Result<Bridges, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let bridges: Bridges =
-        serde_json::from_str(&raw).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+    let file_path = if path.is_dir() {
+        let candidate = path.join("cred.json");
+        if candidate.is_file() {
+            candidate
+        } else {
+            return Err(format!(
+                "cannot read {}: path is a directory and no cred.json file was found inside. (If using Docker, ensure `cred.json` exists as a file on the host before running compose, as Docker creates an empty directory if the file is missing)",
+                path.display()
+            ));
+        }
+    } else {
+        path.to_path_buf()
+    };
+
+    let raw = std::fs::read_to_string(&file_path)
+        .map_err(|e| format!("cannot read {}: {e}", file_path.display()))?;
+    let bridges: Bridges = serde_json::from_str(&raw)
+        .map_err(|e| format!("cannot parse {}: {e}", file_path.display()))?;
 
     if bridges.is_empty() {
         return Err(format!("{} contains no bridges", path.display()));
