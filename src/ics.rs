@@ -3,8 +3,8 @@ use chrono_tz::Tz;
 use ics::components::Property;
 use ics::parameters::TzIDParam;
 use ics::properties::{
-    Categories, Created, Description, DtEnd, DtStart, LastModified, Priority, RRule, Status,
-    Summary, Transp, URL,
+    Categories, Created, Description, DtEnd, DtStart, ExDate, LastModified, Priority, RRule,
+    Status, Summary, Transp, URL,
 };
 use ics::{Event, ICalendar, escape_text};
 use serde::{Deserialize, Deserializer};
@@ -38,6 +38,7 @@ struct DescriptionDirectives {
         deserialize_with = "deserialize_optional_end_of_day_utc"
     )]
     recurrence_until: Option<DateTime<Utc>>,
+    skip: Option<String>,
     tz: Option<String>,
 }
 
@@ -213,6 +214,13 @@ pub fn render(bridge: &Bridge, tasks: &[Task]) -> Calendar {
         }
         if let Some(rrule) = recurrence_rrule(task, &parsed_description.directives) {
             ev.push(RRule::new(rrule));
+            if let Some(exdate) = recurrence_exdate(
+                &start,
+                tz_dir.as_ref(),
+                parsed_description.directives.skip.as_deref(),
+            ) {
+                ev.push(exdate);
+            }
         }
 
         ev.push(URL::new(format!("{task_base}/tasks/{}", task.id)));
@@ -330,7 +338,8 @@ fn parse_directives_from_toml_line(line: &str) -> Option<DescriptionDirectives> 
         return None;
     }
     let directives: DescriptionDirectives = toml::from_str(line).ok()?;
-    if directives.recurrence_until.is_some() || directives.tz.is_some() {
+    if directives.recurrence_until.is_some() || directives.skip.is_some() || directives.tz.is_some()
+    {
         Some(directives)
     } else {
         None
@@ -347,6 +356,9 @@ impl DescriptionDirectives {
     fn merge(&mut self, other: DescriptionDirectives) {
         if other.recurrence_until.is_some() {
             self.recurrence_until = other.recurrence_until;
+        }
+        if other.skip.is_some() {
+            self.skip = other.skip;
         }
         if other.tz.is_some() {
             self.tz = other.tz;
@@ -442,4 +454,45 @@ fn recurrence_rrule(task: &Task, directives: &DescriptionDirectives) -> Option<S
         rule.push_str(&stamp(until));
     }
     Some(rule)
+}
+
+fn recurrence_exdate(
+    start: &DateTime<Utc>,
+    tz_dir: Option<&TzDirective>,
+    skip: Option<&str>,
+) -> Option<ExDate<'static>> {
+    let dates: Vec<NaiveDate> = skip?.split(';').filter_map(parse_naive_date).collect();
+    if dates.is_empty() {
+        return None;
+    }
+
+    let exdate = if let Some(dir) = tz_dir {
+        let reference_time = dir
+            .reference_date
+            .and_time(start.time())
+            .and_utc()
+            .with_timezone(&dir.tz)
+            .time();
+        let values = dates
+            .iter()
+            .map(|date| {
+                date.and_time(reference_time)
+                    .format("%Y%m%dT%H%M%S")
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut exdate = ExDate::new(values);
+        exdate.add(TzIDParam::new(dir.tz.name()));
+        exdate
+    } else {
+        let values = dates
+            .iter()
+            .map(|date| stamp(&date.and_time(start.time()).and_utc()))
+            .collect::<Vec<_>>()
+            .join(",");
+        ExDate::new(values)
+    };
+
+    Some(exdate)
 }
